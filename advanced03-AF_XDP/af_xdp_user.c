@@ -12,6 +12,7 @@
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
+#include <fcntl.h>
 
 #include <sys/resource.h>
 
@@ -29,7 +30,9 @@
 #include "../common/common_params.h"
 #include "../common/common_user_bpf_xdp.h"
 #include "../common/common_libbpf.h"
+#include "/home/kali/Desktop/git/github/others/ubpf/vm/inc/ubpf.h"
 
+#define FILE_PATH "/home/kali/Desktop/git/github/others/ubpf/eBPF/AF_XDP_uBPF.o"
 
 #define NUM_FRAMES         4096
 #define FRAME_SIZE         XSK_UMEM__DEFAULT_FRAME_SIZE
@@ -271,10 +274,78 @@ static inline void csum_replace2(__sum16 *sum, __be16 old, __be16 new)
 {
 	*sum = ~csum16_add(csum16_sub(~(*sum), old), new);
 }
+static int read_binary_file(const char *filename, uint8_t **buf, size_t *len) {
+    int fd = open(filename, O_RDONLY);
+    if (fd < 0) {
+        perror("open");
+        return -1;
+    }
 
+    off_t file_len = lseek(fd, 0, SEEK_END);
+    if (file_len == (off_t) -1) {
+        perror("lseek");
+        close(fd);
+        return -1;
+    }
+
+    *buf = malloc(file_len);
+    if (!*buf) {
+        perror("malloc");
+        close(fd);
+        return -1;
+    }
+
+    if (lseek(fd, 0, SEEK_SET) == (off_t) -1) {
+        perror("lseek");
+        free(*buf);
+        close(fd);
+        return -1;
+    }
+
+    ssize_t n = read(fd, *buf, file_len);
+    if (n < 0 || n != file_len) {
+        perror("read");
+        free(*buf);
+        close(fd);
+        return -1;
+    }
+
+    close(fd);
+    *len = n;
+
+    return 0;
+}
 static bool process_packet(struct xsk_socket_info *xsk,
 			   uint64_t addr, uint32_t len)
 {
+	uint8_t *buf;
+	size_t buf_len;
+
+	if (read_binary_file(FILE_PATH, &buf, &buf_len
+	) != 0) {
+		fprintf(stderr, "Failed to read bytecode file\n");
+		return 1;
+	}
+
+	struct ubpf_vm *vm = ubpf_create();
+	if (!vm) {
+		fprintf(stderr, "Failed to create uBPF VM\n");
+		free(buf);
+		return 1;
+	}
+	int reg = ubpf_register(vm, 0, "csum_replace2", csum_replace2);
+
+	printf("Function registration returned: %d\n", reg);
+	char *errmsg;
+	int rv = ubpf_load_elf(vm, buf, buf_len, &errmsg);
+	if (rv < 0) {
+		fprintf(stderr, "Failed to load eBPF bytecode: %s\n", errmsg);
+		ubpf_destroy(vm);
+		free(buf);
+		return 1;
+	}
+
+	ubpf_jit_fn	fn = ubpf_compile(vm, &errmsg);
 	uint8_t *pkt = xsk_umem__get_data(xsk->umem->buffer, addr);
 
         /* Lesson#3: Write an IPv6 ICMP ECHO parser to send responses
@@ -285,35 +356,43 @@ static bool process_packet(struct xsk_socket_info *xsk,
 	 * - Just return all data with MAC/IP swapped, and type set to
 	 *   ICMPV6_ECHO_REPLY
 	 * - Recalculate the icmp checksum */
+	uint64_t ubpf_ret;
+	
+	// int rv = ubpf_exec(vm, data, RTE_MBUF_DEFAULT_BUF_SIZE, &ubpf_ret);
+	// int rv = ubpf_exec(vm, (uint32_t*) rx_pkts[0]->buf_addr, rx_pkts[0]->pkt_len, &ubpf_ret);
+	// int rv = ubpf_exec(vm, data, rx_pkts[0]->pkt_len, &ubpf_ret);
+	ubpf_ret = fn(pkt, len);
 
-	if (false) {
+  /* FIXME: Start your logic from here */
+  printf("eBPF return status: %lu\n", ubpf_ret);
+	if (true) {
 		int ret;
 		uint32_t tx_idx = 0;
-		uint8_t tmp_mac[ETH_ALEN];
-		struct in6_addr tmp_ip;
-		struct ethhdr *eth = (struct ethhdr *) pkt;
-		struct ipv6hdr *ipv6 = (struct ipv6hdr *) (eth + 1);
-		struct icmp6hdr *icmp = (struct icmp6hdr *) (ipv6 + 1);
+		// uint8_t tmp_mac[ETH_ALEN];
+		// struct in6_addr tmp_ip;
+		// struct ethhdr *eth = (struct ethhdr *) pkt;
+		// struct ipv6hdr *ipv6 = (struct ipv6hdr *) (eth + 1);
+		// struct icmp6hdr *icmp = (struct icmp6hdr *) (ipv6 + 1);
 
-		if (ntohs(eth->h_proto) != ETH_P_IPV6 ||
-		    len < (sizeof(*eth) + sizeof(*ipv6) + sizeof(*icmp)) ||
-		    ipv6->nexthdr != IPPROTO_ICMPV6 ||
-		    icmp->icmp6_type != ICMPV6_ECHO_REQUEST)
-			return false;
+		// if (ntohs(eth->h_proto) != ETH_P_IPV6 ||
+		//     len < (sizeof(*eth) + sizeof(*ipv6) + sizeof(*icmp)) ||
+		//     ipv6->nexthdr != IPPROTO_ICMPV6 ||
+		//     icmp->icmp6_type != ICMPV6_ECHO_REQUEST)
+		// 	return false;
 
-		memcpy(tmp_mac, eth->h_dest, ETH_ALEN);
-		memcpy(eth->h_dest, eth->h_source, ETH_ALEN);
-		memcpy(eth->h_source, tmp_mac, ETH_ALEN);
+		// memcpy(tmp_mac, eth->h_dest, ETH_ALEN);
+		// memcpy(eth->h_dest, eth->h_source, ETH_ALEN);
+		// memcpy(eth->h_source, tmp_mac, ETH_ALEN);
 
-		memcpy(&tmp_ip, &ipv6->saddr, sizeof(tmp_ip));
-		memcpy(&ipv6->saddr, &ipv6->daddr, sizeof(tmp_ip));
-		memcpy(&ipv6->daddr, &tmp_ip, sizeof(tmp_ip));
+		// memcpy(&tmp_ip, &ipv6->saddr, sizeof(tmp_ip));
+		// memcpy(&ipv6->saddr, &ipv6->daddr, sizeof(tmp_ip));
+		// memcpy(&ipv6->daddr, &tmp_ip, sizeof(tmp_ip));
 
-		icmp->icmp6_type = ICMPV6_ECHO_REPLY;
+		// icmp->icmp6_type = ICMPV6_ECHO_REPLY;
 
-		csum_replace2(&icmp->icmp6_cksum,
-			      htons(ICMPV6_ECHO_REQUEST << 8),
-			      htons(ICMPV6_ECHO_REPLY << 8));
+		// csum_replace2(&icmp->icmp6_cksum,
+		// 	      htons(ICMPV6_ECHO_REQUEST << 8),
+		// 	      htons(ICMPV6_ECHO_REPLY << 8));
 
 		/* Here we sent the packet out of the receive port. Note that
 		 * we allocate one entry and schedule it. Your design would be

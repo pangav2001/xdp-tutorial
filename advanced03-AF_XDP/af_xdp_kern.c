@@ -36,7 +36,7 @@ int xdp_sock_prog(struct xdp_md *ctx)
      * has an active AF_XDP socket bound to it. */
     if (bpf_map_lookup_elem(&xsks_map, &index))
         return bpf_redirect_map(&xsks_map, index, 0);
-
+    
     return XDP_PASS;
 }
 
